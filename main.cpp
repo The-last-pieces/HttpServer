@@ -1,9 +1,10 @@
 #include "http.h"
 
 int main(int arg, const char* args[]) {
+
 	std::locale::global(std::locale(""));
 	int port = 8802;
-	string IP = "127.0.0.1";
+	string IP = "59.110.229.171";
 	if (arg >= 2) {
 		port = stoi(args[1]);
 	}

@@ -15,11 +15,11 @@ using namespace std;
 #define HTTP_FILENAME_LEN   256     /* 文件名长度 */
 
 #define head_status "Status"
-#define head_serv "Server: "
-#define head_range "Accept-Ranges: "
-#define head_length "Content-Length: "
-#define head_connect "Connection: "
-#define head_type "Content-Type: "	
+#define head_serv "Server"
+#define head_range "Accept-Ranges"
+#define head_length "Content-Length"
+#define head_connect "Connection"
+#define head_type "Content-Type"	
 #define code_type " ;charset=utf-8"
 #define mes_line "\r\n"
 
@@ -31,11 +31,23 @@ private:
 	static Json Content_Type;//type映射关系
 	static Json Defined_Head;//默认响应头
 
+	class Hmsg {
+	public:
+		string msg;
+
+		Hmsg(const string& str) :msg(str) {
+
+		}
+		void setHeader(const string& id, const string& val) {
+			msg += id + ": " + val + mes_line;
+		}
+	};
+
 	WSADATA wsa_data;//全局数据
 
 	int port = 8802;//负责通信的端口
 	string IP = "127.0.0.1";//监听IP
-	SOCKET client_socket = 0, local_socket = 0;//客户端,服务端(本地)的套接字  
+	SOCKET lis_socket = 0, client_socket = 0;//客户端,服务端(本地)的套接字  
 	sockaddr_in client_info, server_info;//客户端,服务端信息
 public:
 	Http(int _port, const string& ip) {
@@ -47,25 +59,28 @@ public:
 	//绑定端口
 	void setport(int _port) {
 		port = _port;
-		if (client_socket) {
-			closesocket(client_socket);
+		if (lis_socket) {
+			closesocket(lis_socket);
 		}
 
 		//创建套接字
-		client_socket = socket(AF_INET, SOCK_STREAM, 0);
-		if (INVALID_SOCKET == client_socket) {
+		lis_socket = socket(AF_INET, SOCK_STREAM, 0);
+		if (INVALID_SOCKET == lis_socket) {
 			string errinfo = "[Web] Fail to create socket, error = " + to_string(WSAGetLastError());
 			throw exception(errinfo.c_str());
 		}
 
+		//参数初始化
+		memset(&server_info, 0, sizeof(server_info));
 		server_info.sin_family = AF_INET;
 		server_info.sin_port = htons(port);
 		server_info.sin_addr.s_addr = inet_addr(IP.c_str());
-		//监听所有IP : htonl(INADDR_ANY);
+		//inet_addr(IP.c_str());监听指定IP
+		//htonl(INADDR_ANY);监听内网所有IP
 
 		//绑定套接字
-		if (SOCKET_ERROR == bind(client_socket, (struct sockaddr*) & server_info, sizeof(server_info))) {
-			closesocket(client_socket);
+		if (SOCKET_ERROR == bind(lis_socket, (struct sockaddr*) & server_info, sizeof(server_info))) {
+			closesocket(lis_socket);
 			string errinfo = "[Web] Fail to bind, error = " + to_string(WSAGetLastError());
 			throw exception(errinfo.c_str());
 		}
@@ -73,7 +88,7 @@ public:
 
 	void ListenPort() {
 		//开始监听
-		listen(client_socket, SOMAXCONN);
+		listen(lis_socket, 5);
 		while (true) {
 			Json buff;
 			if (receive(buff)) {
@@ -81,25 +96,34 @@ public:
 				Json resp = onreadystatechange(buff);//处理请求
 				respond(makeMessage(resp));//响应信息
 			}
+			else {
+				//非法消息也要响应,防堵塞
+				respond(makeMessage({
+					{head_status,"200"},
+					{"<filetype>","<NULL>"}
+					}));
+			}
+			closesocket(client_socket);
 		}
 	}
 
 	~Http() {
-		if (client_socket) {
-			closesocket(client_socket);
+		if (lis_socket) {
+			closesocket(lis_socket);
 		}
 		WSACleanup();
 	}
 private:
 	//发送响应消息
 	bool respond(string buf) {
-		if (send(local_socket, buf.c_str(), buf.size(), 0) == SOCKET_ERROR)
-		{
+		if (send(client_socket, buf.c_str(), buf.size(), 0) == SOCKET_ERROR){
 			printf("[Web] Fail to send, error = %d\n", WSAGetLastError());
 			return false;
 		}
 		else {
-			printf("[Web] Send message : \n%s\n", buf.c_str());
+			printf("[Web] Send message :\nfrom -> address:[%s], port:[%d]\nto -> address:[%s], port:[%d] \n%s\n", 
+				inet_ntoa(server_info.sin_addr), ntohs(server_info.sin_port),
+				inet_ntoa(client_info.sin_addr), ntohs(client_info.sin_port),buf.c_str());
 			return true;
 		}
 	}
@@ -107,9 +131,8 @@ private:
 	//接收请求消息
 	bool receive(Json& buf) {
 		int len = sizeof(client_info);
-		local_socket = accept(client_socket, (struct sockaddr*) & client_info, &len);//等待有效信息
-		if (local_socket == INVALID_SOCKET) /* 接受失败 */
-		{
+		client_socket = accept(lis_socket, (struct sockaddr*) & client_info, &len);//等待有效信息
+		if (client_socket == INVALID_SOCKET){
 			string errinfo = "[Web] Fail to accept, error = " + to_string(WSAGetLastError());
 			throw exception(errinfo.c_str());
 		}
@@ -117,12 +140,12 @@ private:
 			printf("[Web] Accepted address:[%s], port:[%d]\n",
 				inet_ntoa(client_info.sin_addr), ntohs(client_info.sin_port));
 		}
-		char* rec = new char[HTTP_BUF_SIZE] {0};
-		int mes_len = recv(local_socket, rec, HTTP_BUF_SIZE, 0);
 
-		if (mes_len == SOCKET_ERROR) /* 接收失败 */
-		{
-			closesocket(local_socket);
+		//warning : 未作变长处理
+		char* rec = new char[HTTP_BUF_SIZE] {0};
+		int mes_len = recv(client_socket, rec, HTTP_BUF_SIZE, 0);
+
+		if (mes_len == SOCKET_ERROR){
 			string errinfo = "[Web] Fail to recv, error = " + to_string(WSAGetLastError());
 			throw exception(errinfo.c_str());
 		}
@@ -134,7 +157,7 @@ private:
 			return false;//跳过空消息
 		}
 
-		//获取源信息
+		//解析源消息
 		string info = rec;
 		buf = makeJson(info);
 
@@ -142,7 +165,7 @@ private:
 	}
 
 	//解析Json对象,生成http响应消息
-	string makeMessage(Json& info) {
+	string makeMessage(Json info) {
 		/*
 		200 ok //status
 		Server:
@@ -154,24 +177,20 @@ private:
 		file_info
 		*/
 
-		string mes = GetStatus(info[head_status]) + mes_line;						//状态码
-		mes = mes + head_serv + "MnZn Service <0.1>" + mes_line;					//Server 服务器名称
-		mes = mes + head_range + "bytes" + mes_line;								//接受范围
-		mes = mes + head_length + to_string(info["<buffer>"].length()) + mes_line;	//源数据长度
-		mes = mes + head_connect + "close" + mes_line;								//连接方式
-		mes = mes + head_type + info["<filetype>"] + code_type + mes_line;			//文件类型
+		Hmsg mes = GetStatus(info[head_status]) + mes_line;					//状态码
 
-		mes += mes_line;//头部消息分割
+		mes.setHeader(head_serv, "MnZn Service <0.1>");						//Server 服务器名称
+		mes.setHeader(head_range, "bytes");
+		mes.setHeader(head_length, to_string(info["<buffer>"].length()));	//源数据长度
+		mes.setHeader(head_connect, "close");								//连接方式
+		mes.setHeader(head_type, info["<filetype>"] + code_type);			//文件类型
+		mes.setHeader("Access-Control-Allow-Origin", "*");
+		mes.setHeader("Cache-Control", "no-cache");							//跨域请求
 
-		mes += info["<buffer>"];//文件信息
+		mes.msg += mes_line;
+		mes.msg += info["<buffer>"];										//实际文件
 
-		return mes;
-
-		/*stringstream ss; string filestr = getfile(info["<filename>"]);
-		ss << "HTTP / 1.1 200 OK\r\nServer: MnZn Server <0.1>\r\n"
-			"Accept-Ranges: bytes\r\nContent-Length:" << filestr.size() << "\r\nConnection: close\r\n"
-			"Content-Type:text/html; charset=utf-8\r\n\r\n" << filestr;
-		return ss.str();*/
+		return mes.msg;
 	}
 	//解析http请求消息,生成Json对象
 	Json makeJson(const string& mes) {
@@ -300,7 +319,8 @@ Json Http::Content_Type = {
 	{"html",    "text/html"  },
 	{"gif",     "image/gif"  },
 	{"jpeg",    "image/jpeg" },
-	{"js",	"application/x-javascript"},
-	{"json","application/json"},
-	{"<NULL>","text/html"}
+	{"js",		"application/x-javascript"},
+	{"json",	"application/json"},
+	{"jsp",		"text/html"},
+	{"<NULL>",	"text/html"}
 };
